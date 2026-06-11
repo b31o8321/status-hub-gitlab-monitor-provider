@@ -14,7 +14,22 @@ Configure the provider in StatusHub settings:
 - GitLab base URL, for example `https://gitlab.com`
 - Personal access token
 - Refresh interval in seconds
-- Repositories JSON:
+- Monitored projects and branches through **选择项目和分支**
+
+The project selector is provider-owned. StatusHub only opens the selector; this
+provider searches GitLab projects, lets you add projects, and configures branch
+watch rules without editing JSON by hand.
+
+Branch selectors are compatible with the previous GitLab Monitor app model:
+
+- Fixed branch: watches one branch such as `main`.
+- Dynamic latest match: resolves the latest branch matching a prefix and date
+  format, such as `test-20260611`.
+- Regex: resolves the latest branch matching a custom regular expression.
+
+## Config Shape
+
+The selector writes `runtime/config.json`. The current shape is:
 
 ```json
 [
@@ -62,11 +77,6 @@ Branch selectors are compatible with the previous GitLab Monitor app model:
   matching branch such as `test-20260611`.
 - `{"type":"regex","value":"^release-.*$"}` resolves the latest matching branch
   by regex.
-
-The previous app's two-step interaction, connection first and then project /
-branch selection, should be implemented as provider-owned configuration UI or a
-configuration helper command. StatusHub should stay generic and only launch that
-provider-owned flow.
 
 ## Local Check
 

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNTIME_DIR="$ROOT_DIR/runtime"
+HELPER="$RUNTIME_DIR/gitlab-configurator"
+SOURCE="$ROOT_DIR/src/GitLabConfigurator/main.swift"
+
+mkdir -p "$RUNTIME_DIR"
+
+if [ ! -x "$HELPER" ] || [ "$SOURCE" -nt "$HELPER" ]; then
+  xcrun swiftc -parse-as-library "$SOURCE" -o "$HELPER"
+fi
+
+exec "$HELPER"
