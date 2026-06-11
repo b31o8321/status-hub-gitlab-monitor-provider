@@ -1,0 +1,53 @@
+{
+  "id": "gitlab-monitor",
+  "title": "GitLab Monitor",
+  "version": "0.1.0",
+  "providers": [
+    {
+      "id": "pipelines",
+      "title": "GitLab Pipelines",
+      "icon": "chevron.left.forwardslash.chevron.right",
+      "statusFile": "runtime/status.json",
+      "configFile": "runtime/config.json",
+      "command": "bin/gitlab-monitor-provider",
+      "arguments": [],
+      "workingDirectory": ".",
+      "configuration": [
+        {
+          "id": "gitlab",
+          "title": "GitLab",
+          "fields": [
+            {
+              "key": "gitlab.baseUrl",
+              "title": "GitLab 地址",
+              "type": "text",
+              "defaultValue": "https://gitlab.com",
+              "placeholder": "https://gitlab.example.com"
+            },
+            {
+              "key": "gitlab.accessToken",
+              "title": "Access Token",
+              "type": "password",
+              "placeholder": "glpat-..."
+            },
+            {
+              "key": "refreshIntervalSeconds",
+              "title": "刷新间隔",
+              "type": "number",
+              "defaultValue": "60",
+              "placeholder": "60",
+              "help": "单位：秒"
+            },
+            {
+              "key": "repositories",
+              "title": "仓库列表",
+              "type": "textarea",
+              "placeholder": "[{\"id\":\"group/project\",\"name\":\"Project\",\"branch\":\"main\"}]",
+              "help": "JSON 数组。id 支持数字项目 ID 或 group/project；branch 为空时默认 main"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
