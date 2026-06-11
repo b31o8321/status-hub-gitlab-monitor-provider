@@ -5,6 +5,35 @@ struct Config: Codable {
     var gitlab: GitLabSettings = GitLabSettings()
     var refreshIntervalSeconds: Int = 60
     var repositories: [Repository] = []
+
+    enum CodingKeys: String, CodingKey {
+        case gitlab
+        case refreshIntervalSeconds
+        case repositories
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        gitlab = try container.decodeIfPresent(GitLabSettings.self, forKey: .gitlab) ?? GitLabSettings()
+        if let interval = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalSeconds) {
+            refreshIntervalSeconds = interval
+        } else if let interval = try container.decodeIfPresent(String.self, forKey: .refreshIntervalSeconds),
+                  let parsed = Int(interval) {
+            refreshIntervalSeconds = parsed
+        }
+
+        if let decoded = try? container.decode([Repository].self, forKey: .repositories) {
+            repositories = decoded
+        } else if let raw = try container.decodeIfPresent(String.self, forKey: .repositories),
+                  let data = raw.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode([Repository].self, from: data) {
+            repositories = decoded
+        } else {
+            repositories = []
+        }
+    }
 }
 
 struct GitLabSettings: Codable {
@@ -300,6 +329,10 @@ struct ContentView: View {
             footer
         }
         .frame(width: 820, height: 620)
+        .onAppear {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+        }
     }
 
     private var header: some View {
@@ -548,12 +581,45 @@ struct BranchEditor: View {
     }
 }
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+}
+
 @main
 struct GitLabConfiguratorApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
         .windowStyle(.titleBar)
+        .commands {
+            CommandMenu("编辑") {
+                Button("撤销") { NSApplication.shared.sendAction(Selector(("undo:")), to: nil, from: nil) }
+                    .keyboardShortcut("z")
+                Button("重做") { NSApplication.shared.sendAction(Selector(("redo:")), to: nil, from: nil) }
+                    .keyboardShortcut("Z", modifiers: [.command, .shift])
+                Divider()
+                Button("剪切") { NSApplication.shared.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("x")
+                Button("复制") { NSApplication.shared.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("c")
+                Button("粘贴") { NSApplication.shared.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("v")
+                Button("全选") { NSApplication.shared.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("a")
+            }
+        }
     }
 }
