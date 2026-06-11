@@ -7,6 +7,7 @@ from urllib import error, parse, request
 import argparse
 import json
 import os
+import re
 import tempfile
 import time
 
@@ -78,7 +79,9 @@ def build_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     base_url = str(settings.get("baseUrl") or "https://gitlab.com").rstrip("/")
     token = str(settings.get("accessToken") or "").strip()
 
-    items = [repository_item(base_url, token, repository) for repository in repositories]
+    items = []
+    for repository in repositories:
+        items.extend(repository_items(base_url, token, repository))
     return {
         "status": overall_status([str(item.get("status") or "unknown") for item in items]),
         "summary": summary_text(items),
@@ -105,32 +108,65 @@ def parse_repositories(value: Any) -> list[dict[str, Any]]:
     return repositories
 
 
-def repository_item(base_url: str, token: str, repository: dict[str, Any]) -> dict[str, Any]:
+def repository_items(base_url: str, token: str, repository: dict[str, Any]) -> list[dict[str, Any]]:
+    watches = branch_watches(repository)
+    if not watches:
+        watches = [{"selector": {"type": "fixed", "value": str(repository.get("branch") or "main")}}]
+    return [
+        repository_item(base_url, token, repository, watch)
+        for watch in watches
+    ]
+
+
+def branch_watches(repository: dict[str, Any]) -> list[dict[str, Any]]:
+    branches = repository.get("branches")
+    if isinstance(branches, list):
+        return [branch for branch in branches if isinstance(branch, dict)]
+    branch = str(repository.get("branch") or "").strip()
+    if branch:
+        return [{"selector": {"type": "fixed", "value": branch}}]
+    return []
+
+
+def repository_item(base_url: str, token: str, repository: dict[str, Any], watch: dict[str, Any]) -> dict[str, Any]:
     project_id = str(repository.get("id") or "").strip()
+    project_path = str(repository.get("projectPath") or project_id).strip()
     name = str(repository.get("name") or project_id)
-    branch = str(repository.get("branch") or "main").strip()
+    selector = watch.get("selector") if isinstance(watch.get("selector"), dict) else {"type": "fixed", "value": "main"}
+    branch_hint = selector_hint(selector)
     try:
-        pipeline = latest_pipeline(base_url, token, project_id, branch)
+        branch = resolve_branch(base_url, token, project_path, selector)
+        if not branch:
+            return {
+                "id": stable_id(project_path, branch_hint),
+                "title": name,
+                "subtitle": f"{branch_hint} 未匹配到分支",
+                "status": "attention",
+                "value": "无分支",
+                "detail": {"selector": branch_hint},
+                "links": [project_link(base_url, project_path)],
+            }
+        pipeline = latest_pipeline(base_url, token, project_path, branch)
     except Exception as exc:
         return {
-            "id": stable_id(project_id, branch),
+            "id": stable_id(project_path, branch_hint),
             "title": name,
             "subtitle": str(exc),
             "status": "failed",
             "value": "失败",
-            "detail": {"branch": branch},
-            "links": [project_link(base_url, project_id)],
+            "detail": {"selector": branch_hint},
+            "links": [project_link(base_url, project_path)],
         }
 
     if not pipeline:
         return {
-            "id": stable_id(project_id, branch),
+            "id": stable_id(project_path, branch),
             "title": name,
             "subtitle": f"{branch} 没有 pipeline",
             "status": "attention",
             "value": "无记录",
             "detail": {"branch": branch},
-            "links": [project_link(base_url, project_id)],
+            "links": [project_link(base_url, project_path)],
         }
 
     gitlab_status = str(pipeline.get("status") or "unknown")
@@ -142,11 +178,11 @@ def repository_item(base_url: str, token: str, repository: dict[str, Any]) -> di
         "updated": short_datetime(str(pipeline.get("updated_at") or pipeline.get("created_at") or "")),
     }
     detail = {key: value for key, value in detail.items() if value}
-    links = [project_link(base_url, project_id)]
+    links = [project_link(base_url, project_path)]
     if pipeline_url:
-        links.insert(0, {"id": f"{stable_id(project_id, branch)}-pipeline", "title": "最新 Pipeline", "url": pipeline_url})
+        links.insert(0, {"id": f"{stable_id(project_path, branch)}-pipeline", "title": "最新 Pipeline", "url": pipeline_url})
     return {
-        "id": stable_id(project_id, branch),
+        "id": stable_id(project_path, branch),
         "title": name,
         "subtitle": branch,
         "status": hub_status,
@@ -155,6 +191,69 @@ def repository_item(base_url: str, token: str, repository: dict[str, Any]) -> di
         "detail": detail,
         "links": links,
     }
+
+
+def resolve_branch(base_url: str, token: str, project_id: str, selector: dict[str, Any]) -> str | None:
+    selector_type = str(selector.get("type") or "fixed")
+    if selector_type == "fixed":
+        return str(selector.get("value") or "main").strip() or "main"
+
+    if selector_type == "rule":
+        prefix = str(selector.get("prefix") or "test")
+        pattern = branch_rule_regex(prefix, str(selector.get("format") or "yyyymmdd"))
+        search = f"^{prefix}-"
+        return latest_matching_branch(base_url, token, project_id, pattern, search)
+
+    if selector_type == "regex":
+        pattern = str(selector.get("value") or "").strip()
+        if not pattern:
+            return None
+        return latest_matching_branch(base_url, token, project_id, pattern, None)
+
+    return None
+
+
+def branch_rule_regex(prefix: str, date_format: str) -> str:
+    escaped = re.escape(prefix)
+    if date_format == "yyyymmddDashed":
+        return rf"^{escaped}-\d{{4}}-\d{{2}}-\d{{2}}$"
+    if date_format == "yyyymmddDotted":
+        return rf"^{escaped}-\d{{4}}\.\d{{2}}\.\d{{2}}$"
+    if date_format == "yyyymmddWithTail":
+        return rf"^{escaped}-\d{{8}}-.+$"
+    return rf"^{escaped}-\d{{8}}$"
+
+
+def latest_matching_branch(
+    base_url: str,
+    token: str,
+    project_id: str,
+    pattern: str,
+    search: str | None,
+) -> str | None:
+    branches = fetch_branches(base_url, token, project_id, search)
+    regex = re.compile(pattern)
+    matched = sorted(
+        [name for name in branches if regex.search(name)],
+        reverse=True,
+    )
+    return matched[0] if matched else None
+
+
+def fetch_branches(base_url: str, token: str, project_id: str, search: str | None = None) -> list[str]:
+    encoded_project = parse.quote(project_id, safe="")
+    query: dict[str, Any] = {"per_page": 100}
+    if search:
+        query["search"] = search
+    url = f"{base_url}/api/v4/projects/{encoded_project}/repository/branches?{parse.urlencode(query)}"
+    payload = gitlab_get(url, token)
+    if not isinstance(payload, list):
+        return []
+    return [
+        str(branch.get("name"))
+        for branch in payload
+        if isinstance(branch, dict) and branch.get("name")
+    ]
 
 
 def latest_pipeline(base_url: str, token: str, project_id: str, branch: str) -> dict[str, Any] | None:
@@ -183,6 +282,15 @@ def project_link(base_url: str, project_id: str) -> dict[str, str]:
     if project_id.isdigit():
         return {"id": f"{project_id}-project", "title": "项目", "url": base_url}
     return {"id": f"{stable_id(project_id, '')}-project", "title": "项目", "url": f"{base_url}/{project_id}"}
+
+
+def selector_hint(selector: dict[str, Any]) -> str:
+    selector_type = str(selector.get("type") or "fixed")
+    if selector_type == "rule":
+        return f"{selector.get('prefix') or 'test'}-..."
+    if selector_type == "regex":
+        return str(selector.get("value") or "regex")
+    return str(selector.get("value") or "main")
 
 
 def stable_id(project_id: str, branch: str) -> str:
@@ -218,7 +326,7 @@ def summary_text(items: list[dict[str, Any]]) -> str:
         return f"{running} 个 Pipeline 运行中"
     if attention:
         return f"{attention} 个 Pipeline 需要关注"
-    return f"{len(items)} 个仓库正常"
+    return f"{len(items)} 个分支正常"
 
 
 def refresh_interval(config: dict[str, Any]) -> int:

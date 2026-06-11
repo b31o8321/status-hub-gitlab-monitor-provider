@@ -1,12 +1,12 @@
 {
   "id": "gitlab-monitor",
   "title": "GitLab Monitor",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "providers": [
     {
       "id": "pipelines",
       "title": "GitLab Pipelines",
-      "icon": "chevron.left.forwardslash.chevron.right",
+      "icon": "assets/gitlab-icon.svg",
       "statusFile": "runtime/status.json",
       "configFile": "runtime/config.json",
       "command": "bin/gitlab-monitor-provider",
@@ -42,8 +42,8 @@
               "key": "repositories",
               "title": "仓库列表",
               "type": "textarea",
-              "placeholder": "[{\"id\":\"group/project\",\"name\":\"Project\",\"branch\":\"main\"}]",
-              "help": "JSON 数组。id 支持数字项目 ID 或 group/project；branch 为空时默认 main"
+              "placeholder": "[{\"id\":\"group/project\",\"name\":\"Project\",\"branches\":[{\"selector\":{\"type\":\"fixed\",\"value\":\"main\"}}]}]",
+              "help": "JSON 数组。支持旧版 branch，也支持 branches 多分支和 fixed/rule/regex selector"
             }
           ]
         }
