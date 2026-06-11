@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
@@ -171,16 +171,21 @@ def repository_item(base_url: str, token: str, repository: dict[str, Any], watch
 
     gitlab_status = str(pipeline.get("status") or "unknown")
     hub_status = GITLAB_TO_HUB.get(gitlab_status, "unknown")
+    pipeline_id = pipeline.get("id")
+    if hub_status == "running" and pipeline_id:
+        pipeline = pipeline_detail(base_url, token, project_path, pipeline_id) or pipeline
     pipeline_url = str(pipeline.get("web_url") or "")
     detail = {
         "branch": branch,
-        "pipeline": f"#{pipeline.get('id')}" if pipeline.get("id") else "",
-        "updated": short_datetime(str(pipeline.get("updated_at") or pipeline.get("created_at") or "")),
+        "pipeline": f"#{pipeline_id}" if pipeline_id else "",
+        "updatedText": relative_age(str(pipeline.get("updated_at") or pipeline.get("created_at") or "")),
     }
+    if hub_status == "running":
+        detail.update(running_progress_detail(base_url, token, project_path, branch, pipeline))
     detail = {key: value for key, value in detail.items() if value}
     links = [project_link(base_url, project_path)]
     if pipeline_url:
-        links.insert(0, {"id": f"{stable_id(project_path, branch)}-pipeline", "title": "最新 Pipeline", "url": pipeline_url})
+        links.insert(0, {"id": f"{stable_id(project_path, branch)}-pipeline", "title": "Pipeline", "url": pipeline_url})
     return {
         "id": stable_id(project_path, branch),
         "title": name,
@@ -266,6 +271,83 @@ def latest_pipeline(base_url: str, token: str, project_id: str, branch: str) -> 
     return None
 
 
+def pipeline_detail(base_url: str, token: str, project_id: str, pipeline_id: Any) -> dict[str, Any] | None:
+    encoded_project = parse.quote(project_id, safe="")
+    url = f"{base_url}/api/v4/projects/{encoded_project}/pipelines/{pipeline_id}"
+    payload = gitlab_get(url, token)
+    return payload if isinstance(payload, dict) else None
+
+
+def recent_success_durations(base_url: str, token: str, project_id: str, branch: str, limit: int = 5) -> list[float]:
+    encoded_project = parse.quote(project_id, safe="")
+    query = parse.urlencode({
+        "ref": branch,
+        "status": "success",
+        "per_page": max(1, min(limit, 20)),
+        "order_by": "id",
+        "sort": "desc",
+    })
+    url = f"{base_url}/api/v4/projects/{encoded_project}/pipelines?{query}"
+    payload = gitlab_get(url, token)
+    if not isinstance(payload, list):
+        return []
+
+    durations: list[float] = []
+    for pipeline in payload:
+        if not isinstance(pipeline, dict) or not pipeline.get("id"):
+            continue
+        try:
+            detail = pipeline_detail(base_url, token, project_id, pipeline["id"]) or {}
+        except Exception:
+            continue
+        duration = run_duration_seconds(detail)
+        if duration and duration > 0:
+            durations.append(duration)
+    return durations
+
+
+def running_progress_detail(
+    base_url: str,
+    token: str,
+    project_id: str,
+    branch: str,
+    pipeline: dict[str, Any],
+) -> dict[str, str]:
+    started = parse_gitlab_datetime(
+        str(pipeline.get("started_at") or pipeline.get("created_at") or pipeline.get("updated_at") or "")
+    )
+    if not started:
+        return {}
+
+    elapsed = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+    durations = recent_success_durations(base_url, token, project_id, branch)
+    baseline = sum(durations) / len(durations) if durations else 0
+    if baseline > 0:
+        progress = min(elapsed / baseline, 1.0)
+        overrun = elapsed > baseline
+        return {
+            "progressPercent": f"{progress:.3f}",
+            "progressText": progress_label(elapsed, baseline, overrun),
+            "elapsedText": f"已运行 {format_duration(elapsed)}",
+        }
+    return {
+        "progressText": f"已运行 {format_duration(elapsed)}",
+        "elapsedText": f"已运行 {format_duration(elapsed)}",
+    }
+
+
+def run_duration_seconds(pipeline: dict[str, Any]) -> float | None:
+    duration = pipeline.get("duration")
+    if isinstance(duration, (int, float)) and duration > 0:
+        return float(duration)
+    started = parse_gitlab_datetime(str(pipeline.get("started_at") or ""))
+    finished = parse_gitlab_datetime(str(pipeline.get("finished_at") or ""))
+    if not started or not finished:
+        return None
+    interval = (finished - started).total_seconds()
+    return interval if interval > 0 else None
+
+
 def gitlab_get(url: str, token: str) -> Any:
     headers = {"Accept": "application/json"}
     if token:
@@ -300,7 +382,7 @@ def stable_id(project_id: str, branch: str) -> str:
 
 def pipeline_value(status: str) -> str:
     return {
-        "success": "通过",
+        "success": "成功",
         "failed": "失败",
         "running": "运行中",
         "pending": "等待中",
@@ -349,6 +431,47 @@ def short_datetime(value: str) -> str:
         return datetime.fromisoformat(normalized).astimezone().strftime("%m-%d %H:%M")
     except ValueError:
         return value
+
+
+def parse_gitlab_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def relative_age(value: str) -> str:
+    parsed = parse_gitlab_datetime(value)
+    if not parsed:
+        return short_datetime(value)
+    seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+    return f"{format_duration(seconds)}前"
+
+
+def progress_label(elapsed: float, baseline: float, overrun: bool) -> str:
+    if overrun:
+        return f"{format_duration(elapsed)}（超过历史 {format_duration(baseline)}）"
+    return f"{format_duration(elapsed)} / {format_duration(baseline)}"
+
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return f"{total}s"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    remaining_minutes = minutes % 60
+    if remaining_minutes == 0:
+        return f"{hours}h"
+    return f"{hours}h {remaining_minutes}m"
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
